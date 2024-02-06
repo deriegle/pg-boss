@@ -129,6 +129,7 @@ function checkWorkArgs (name, args, defaults) {
   assert(!('teamSize' in options) || (Number.isInteger(options.teamSize) && options.teamSize >= 1), 'teamSize must be an integer > 0')
   assert(!('batchSize' in options) || (Number.isInteger(options.batchSize) && options.batchSize >= 1), 'batchSize must be an integer > 0')
   assert(!('includeMetadata' in options) || typeof options.includeMetadata === 'boolean', 'includeMetadata must be a boolean')
+  assert(!('enforceSingletonQueueActiveLimit' in options) || typeof options.enforceSingletonQueueActiveLimit === 'boolean', 'enforceSingletonQueueActiveLimit must be a boolean')
 
   return { options, callback }
 }
@@ -140,6 +141,7 @@ function checkFetchArgs (name, batchSize, options) {
 
   assert(!batchSize || (Number.isInteger(batchSize) && batchSize >= 1), 'batchSize must be an integer > 0')
   assert(!('includeMetadata' in options) || typeof options.includeMetadata === 'boolean', 'includeMetadata must be a boolean')
+  assert(!('enforceSingletonQueueActiveLimit' in options) || typeof options.enforceSingletonQueueActiveLimit === 'boolean', 'enforceSingletonQueueActiveLimit must be a boolean')
 
   return { name }
 }
@@ -159,6 +161,7 @@ function getConfig (value) {
   applyDatabaseConfig(config)
   applyMaintenanceConfig(config)
   applyArchiveConfig(config)
+  applyArchiveFailedConfig(config)
   applyDeleteConfig(config)
   applyMonitoringConfig(config)
   applyUuidConfig(config)
@@ -191,6 +194,19 @@ function applyArchiveConfig (config) {
   config.archiveInterval = `${config.archiveSeconds} seconds`
 
   if (config.archiveSeconds < 60) {
+    emitWarning(WARNINGS.CRON_DISABLED)
+  }
+}
+
+function applyArchiveFailedConfig (config) {
+  assert(!('archiveFailedAfterSeconds' in config) || config.archiveFailedAfterSeconds >= 1,
+    'configuration assert: archiveFailedAfterSeconds must be at least every second and less than ')
+
+  config.archiveFailedSeconds = config.archiveFailedAfterSeconds || config.archiveSeconds
+  config.archiveFailedInterval = `${config.archiveFailedSeconds} seconds`
+
+  // Do not emit warning twice
+  if (config.archiveFailedSeconds < 60 && config.archiveSeconds >= 60) {
     emitWarning(WARNINGS.CRON_DISABLED)
   }
 }
@@ -373,6 +389,14 @@ function applyMonitoringConfig (config) {
     ('cronMonitorIntervalSeconds' in config)
       ? config.cronMonitorIntervalSeconds
       : 60
+
+  assert(!('cronWorkerIntervalSeconds' in config) || (config.cronWorkerIntervalSeconds >= 1 && config.cronWorkerIntervalSeconds <= 60),
+    'configuration assert: cronWorkerIntervalSeconds must be between 1 and 60 seconds')
+
+  config.cronWorkerIntervalSeconds =
+    ('cronWorkerIntervalSeconds' in config)
+      ? config.cronWorkerIntervalSeconds
+      : 4
 }
 
 function applyUuidConfig (config) {

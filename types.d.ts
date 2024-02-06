@@ -44,6 +44,7 @@ declare namespace PgBoss {
     maintenanceIntervalMinutes?: number;
 
     archiveCompletedAfterSeconds?: number;
+    archiveFailedAfterSeconds?: number;
   }
 
   type ConstructorOptions =
@@ -106,26 +107,43 @@ declare namespace PgBoss {
     newJobCheckIntervalSeconds?: number;
   }
 
-  interface JobFetchOptions {
+  interface CommonJobFetchOptions {
+    includeMetadata?: boolean;
+    enforceSingletonQueueActiveLimit?: boolean;
+  }
+
+  type JobFetchOptions  = CommonJobFetchOptions & {
     teamSize?: number;
     teamConcurrency?: number;
     teamRefill?: boolean;
-    batchSize?: number;
-    includeMetadata?: boolean;
+  }
+
+  type BatchJobFetchOptions = CommonJobFetchOptions & {
+    batchSize: number;
   }
 
   type WorkOptions = JobFetchOptions & JobPollingOptions
+  type BatchWorkOptions = BatchJobFetchOptions & JobPollingOptions
 
   type FetchOptions = {
     includeMetadata?: boolean;
+    enforceSingletonQueueActiveLimit?: boolean;
   } & ConnectionOptions;
 
-  interface WorkHandler<ReqData, ResData> {
-    (job: PgBoss.JobWithDoneCallback<ReqData, ResData>): Promise<ResData> | void;
+  interface WorkHandler<ReqData> {
+    (job: PgBoss.Job<ReqData>): Promise<any>;
   }
 
-  interface WorkWithMetadataHandler<ReqData, ResData> {
-    (job: PgBoss.JobWithMetadataDoneCallback<ReqData, ResData>): Promise<ResData> | void;
+  interface BatchWorkHandler<ReqData> {
+    (job: PgBoss.Job<ReqData>[]): Promise<any>;
+  }
+
+  interface WorkWithMetadataHandler<ReqData> {
+    (job: PgBoss.JobWithMetadata<ReqData>): Promise<any>;
+  }
+
+  interface BatchWorkWithMetadataHandler<ReqData> {
+    (job: PgBoss.JobWithMetadata<ReqData>[]): Promise<any>;
   }
 
   interface Request {
@@ -139,10 +157,6 @@ declare namespace PgBoss {
     cron: string;
     data?: object;
     options?: ScheduleOptions;
-  }
-
-  interface JobDoneCallback<T> {
-    (err?: Error | null, data?: T): void;
   }
 
   // source (for now): https://github.com/bendrucker/postgres-interval/blob/master/index.d.ts
@@ -203,14 +217,6 @@ declare namespace PgBoss {
     onComplete?: boolean
   }
 
-  interface JobWithDoneCallback<ReqData, ResData> extends Job<ReqData> {
-    done: JobDoneCallback<ResData>;
-  }
-
-  interface JobWithMetadataDoneCallback<ReqData, ResData> extends JobWithMetadata<ReqData> {
-    done: JobDoneCallback<ResData>;
-  }
-
   interface MonitorState {
     all: number;
     created: number;
@@ -242,6 +248,7 @@ declare namespace PgBoss {
   }
 
   interface StopOptions {
+    destroy?: boolean,
     graceful?: boolean,
     timeout?: number
   }
@@ -306,9 +313,12 @@ declare class PgBoss extends EventEmitter {
   insert(jobs: PgBoss.JobInsert[]): Promise<void>;
   insert(jobs: PgBoss.JobInsert[], options: PgBoss.InsertOptions): Promise<void>;
 
-  work<ReqData, ResData>(name: string, handler: PgBoss.WorkHandler<ReqData, ResData>): Promise<string>;
-  work<ReqData, ResData>(name: string, options: PgBoss.WorkOptions & { includeMetadata: true }, handler: PgBoss.WorkWithMetadataHandler<ReqData, ResData>): Promise<string>;
-  work<ReqData, ResData>(name: string, options: PgBoss.WorkOptions, handler: PgBoss.WorkHandler<ReqData, ResData>): Promise<string>;
+  work<ReqData>(name: string, handler: PgBoss.WorkHandler<ReqData>): Promise<string>;
+  work<ReqData>(name: string, options: PgBoss.WorkOptions & { includeMetadata: true }, handler: PgBoss.WorkWithMetadataHandler<ReqData>): Promise<string>;
+  work<ReqData>(name: string, options: PgBoss.WorkOptions, handler: PgBoss.WorkHandler<ReqData>): Promise<string>;
+
+  work<ReqData>(name: string, options: PgBoss.BatchWorkOptions & { includeMetadata: true }, handler: PgBoss.BatchWorkWithMetadataHandler<ReqData>): Promise<string>;
+  work<ReqData>(name: string, options: PgBoss.BatchWorkOptions, handler: PgBoss.BatchWorkHandler<ReqData>): Promise<string>;
 
   onComplete(name: string, handler: Function): Promise<string>;
   onComplete(name: string, options: PgBoss.WorkOptions, handler: Function): Promise<string>;

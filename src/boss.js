@@ -33,7 +33,7 @@ class Boss extends EventEmitter {
     this.events = events
 
     this.expireCommand = plans.locked(config.schema, plans.expire(config.schema))
-    this.archiveCommand = plans.locked(config.schema, plans.archive(config.schema, config.archiveInterval))
+    this.archiveCommand = plans.locked(config.schema, plans.archive(config.schema, config.archiveInterval, config.archiveFailedInterval))
     this.purgeCommand = plans.locked(config.schema, plans.purge(config.schema, config.deleteAfter))
     this.getMaintenanceTimeCommand = plans.getMaintenanceTime(config.schema)
     this.setMaintenanceTimeCommand = plans.setMaintenanceTime(config.schema)
@@ -78,11 +78,19 @@ class Boss extends EventEmitter {
 
   metaMonitor () {
     this.metaMonitorInterval = setInterval(async () => {
-      const { secondsAgo } = await this.getMaintenanceTime()
+      try {
+        if (this.config.__test__throw_meta_monitor) {
+          throw new Error(this.config.__test__throw_meta_monitor)
+        }
 
-      if (secondsAgo > this.maintenanceIntervalSeconds * 2) {
-        await this.manager.deleteQueue(queues.MAINTENANCE, { before: states.completed })
-        await this.maintenanceAsync()
+        const { secondsAgo } = await this.getMaintenanceTime()
+
+        if (secondsAgo > this.maintenanceIntervalSeconds * 2) {
+          await this.manager.deleteQueue(queues.MAINTENANCE, { before: states.completed })
+          await this.maintenanceAsync()
+        }
+      } catch (err) {
+        this.emit(events.error, err)
       }
     }, this.maintenanceIntervalSeconds * 2 * 1000)
   }
@@ -116,7 +124,7 @@ class Boss extends EventEmitter {
   async onMaintenance (job) {
     try {
       if (this.config.__test__throw_maint) {
-        throw new Error('__test__throw_maint')
+        throw new Error(this.config.__test__throw_maint)
       }
 
       const started = Date.now()
@@ -132,7 +140,7 @@ class Boss extends EventEmitter {
       this.emit('maintenance', { ms: ended - started })
 
       if (!this.stopped) {
-        await job.done() // pre-complete to bypass throttling
+        await this.manager.complete(job.id) // pre-complete to bypass throttling
         await this.maintenanceAsync({ startAfter: this.maintenanceIntervalSeconds })
       }
     } catch (err) {
@@ -143,7 +151,7 @@ class Boss extends EventEmitter {
   async onMonitorStates (job) {
     try {
       if (this.config.__test__throw_monitor) {
-        throw new Error('__test__throw_monitor')
+        throw new Error(this.config.__test__throw_monitor)
       }
 
       const states = await this.countStates()
@@ -151,7 +159,7 @@ class Boss extends EventEmitter {
       this.emit(events.monitorStates, states)
 
       if (!this.stopped && this.monitorStates) {
-        await job.done() // pre-complete to bypass throttling
+        await this.manager.complete(job.id) // pre-complete to bypass throttling
         await this.monitorStatesAsync({ startAfter: this.monitorIntervalSeconds })
       }
     } catch (err) {
@@ -161,7 +169,7 @@ class Boss extends EventEmitter {
 
   async stop () {
     if (this.config.__test__throw_stop) {
-      throw new Error('__test__throw_stop')
+      throw new Error(this.config.__test__throw_stop)
     }
 
     if (!this.stopped) {

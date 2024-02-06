@@ -45,15 +45,15 @@ class Timekeeper extends EventEmitter {
 
   async start () {
     // setting the archive config too low breaks the cron 60s debounce interval so don't even try
-    if (this.config.archiveSeconds < 60) {
+    if (this.config.archiveSeconds < 60 || this.config.archiveFailedSeconds < 60) {
       return
     }
 
     // cache the clock skew from the db server
     await this.cacheClockSkew()
 
-    await this.manager.work(queues.CRON, { newJobCheckIntervalSeconds: 4 }, (job) => this.onCron(job))
-    await this.manager.work(queues.SEND_IT, { newJobCheckIntervalSeconds: 4, teamSize: 50, teamConcurrency: 5 }, (job) => this.onSendIt(job))
+    await this.manager.work(queues.CRON, { newJobCheckIntervalSeconds: this.config.cronWorkerIntervalSeconds }, (job) => this.onCron(job))
+    await this.manager.work(queues.SEND_IT, { newJobCheckIntervalSeconds: this.config.cronWorkerIntervalSeconds, teamSize: 50, teamConcurrency: 5 }, (job) => this.onSendIt(job))
 
     // uses sendDebounced() to enqueue a cron check
     await this.checkSchedulesAsync()
@@ -88,29 +88,47 @@ class Timekeeper extends EventEmitter {
   }
 
   async monitorCron () {
-    const { secondsAgo } = await this.getCronTime()
+    try {
+      if (this.config.__test__force_cron_monitoring_error) {
+        throw new Error(this.config.__test__force_cron_monitoring_error)
+      }
 
-    if (secondsAgo > 60) {
-      await this.checkSchedulesAsync()
+      const { secondsAgo } = await this.getCronTime()
+
+      if (secondsAgo > 60) {
+        await this.checkSchedulesAsync()
+      }
+    } catch (err) {
+      this.emit(this.events.error, err)
     }
   }
 
   async cacheClockSkew () {
-    const { rows } = await this.db.executeSql(this.getTimeCommand)
+    let skew = 0
 
-    const local = Date.now()
+    try {
+      if (this.config.__test__force_clock_monitoring_error) {
+        throw new Error(this.config.__test__force_clock_monitoring_error)
+      }
 
-    const dbTime = parseFloat(rows[0].time)
+      const { rows } = await this.db.executeSql(this.getTimeCommand)
 
-    const skew = dbTime - local
+      const local = Date.now()
 
-    const skewSeconds = Math.abs(skew) / 1000
+      const dbTime = parseFloat(rows[0].time)
 
-    if (skewSeconds >= 60 || this.config.__test__force_clock_skew_warning) {
-      Attorney.warnClockSkew(`Instance clock is ${skewSeconds}s ${skew > 0 ? 'slower' : 'faster'} than database.`)
+      skew = dbTime - local
+
+      const skewSeconds = Math.abs(skew) / 1000
+
+      if (skewSeconds >= 60 || this.config.__test__force_clock_skew_warning) {
+        Attorney.warnClockSkew(`Instance clock is ${skewSeconds}s ${skew > 0 ? 'slower' : 'faster'} than database.`)
+      }
+    } catch (err) {
+      this.emit(this.events.error, err)
+    } finally {
+      this.clockSkew = skew
     }
-
-    this.clockSkew = skew
   }
 
   async checkSchedulesAsync () {
@@ -128,7 +146,7 @@ class Timekeeper extends EventEmitter {
 
     try {
       if (this.config.__test__throw_clock_monitoring) {
-        throw new Error('clock monitoring error')
+        throw new Error(this.config.__test__throw_clock_monitoring)
       }
 
       const items = await this.getSchedules()

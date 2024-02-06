@@ -351,13 +351,31 @@ function insertVersion (schema, version) {
 }
 
 function fetchNextJob (schema) {
-  return (includeMetadata) => `
+  return (includeMetadata, enforceSingletonQueueActiveLimit) => `
     WITH nextJob as (
       SELECT id
-      FROM ${schema}.job
+      FROM ${schema}.job j
       WHERE state < '${states.active}'
         AND name LIKE $1
         AND startAfter < now()
+        ${enforceSingletonQueueActiveLimit
+        ? `AND (
+          CASE
+            WHEN singletonKey IS NOT NULL
+              AND singletonKey LIKE '${SINGLETON_QUEUE_KEY_ESCAPED}%'
+              THEN NOT EXISTS (
+                SELECT 1
+                FROM ${schema}.job active_job
+                WHERE active_job.state = '${states.active}'
+                  AND active_job.name = j.name
+                  AND active_job.singletonKey = j.singletonKey
+                  LIMIT 1
+              )
+            ELSE
+              true
+          END
+        )`
+        : ''}
       ORDER BY priority desc, createdOn, id
       LIMIT $2
       FOR UPDATE SKIP LOCKED
@@ -601,7 +619,7 @@ function insertJobs (schema) {
       keepUntil,
       on_complete
     )
-    SELECT 
+    SELECT
       COALESCE(id, gen_random_uuid()) as id,
       name,
       data,
@@ -639,12 +657,16 @@ function purge (schema, interval) {
   `
 }
 
-function archive (schema, interval) {
+function archive (schema, completedInterval, failedInterval = completedInterval) {
   return `
     WITH archived_rows AS (
       DELETE FROM ${schema}.job
-      WHERE
-        completedOn < (now() - interval '${interval}')
+      WHERE (
+          state <> '${states.failed}' AND completedOn < (now() - interval '${completedInterval}')
+        )
+        OR (
+          state = '${states.failed}' AND completedOn < (now() - interval '${failedInterval}')
+        )
         OR (
           state < '${states.active}' AND keepUntil < now()
         )

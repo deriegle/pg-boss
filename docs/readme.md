@@ -47,17 +47,17 @@
     - [`schedule(name, cron, data, options)`](#schedulename-cron-data-options)
     - [`unschedule(name)`](#unschedulename)
     - [`getSchedules()`](#getschedules)
-  - [`cancel(id)`](#cancelid)
-  - [`cancel([ids])`](#cancelids)
-  - [`resume(id)`](#resumeid)
-  - [`resume([ids])`](#resumeids)
-  - [`complete(id [, data])`](#completeid--data)
-  - [`complete([ids])`](#completeids)
-  - [`fail(id [, data])`](#failid--data)
-  - [`fail([ids])`](#failids)
+  - [`cancel(id, options)`](#cancelid-options)
+  - [`cancel([ids], options)`](#cancelids-options)
+  - [`resume(id, options)`](#resumeid-options)
+  - [`resume([ids], options)`](#resumeids-options)
+  - [`complete(id [, data, options])`](#completeid--data-options)
+  - [`complete([ids], options)`](#completeids-options)
+  - [`fail(id [, data, options])`](#failid--data-options)
+  - [`fail([ids], options)`](#failids-options)
   - [`notifyWorker(id)`](#notifyworkerid)
   - [`getQueueSize(name [, options])`](#getqueuesizename--options)
-  - [`getJobById(id)`](#getjobbyidid)
+  - [`getJobById(id, options)`](#getjobbyidid-options)
   - [`deleteQueue(name)`](#deletequeuename)
   - [`deleteAllQueues()`](#deleteallqueues)
   - [`clearStorage()`](#clearstorage)
@@ -75,7 +75,7 @@ Architecturally, pg-boss is somewhat similar to queue products such as AWS SQS, 
 
 ## Job states
 
-All jobs start out in the `created` state and become `active` when picked up for work. If job processing completes successfully, jobs will go to `completed`. If a job fails, it will typcially enter the `failed` state. However, if a job has retry options configured, it will enter the `retry` state on failure instead and have a chance to re-enter `active` state. It's also possible for `active` jobs to become `expired`, which happens when job processing takes too long. Jobs can also enter `cancelled` state via [`cancel(id)`](#cancelid) or [`cancel([ids])`](#cancelids).
+All jobs start out in the `created` state and become `active` when picked up for work. If job processing completes successfully, jobs will go to `completed`. If a job fails, it will typically enter the `failed` state. However, if a job has retry options configured, it will enter the `retry` state on failure instead and have a chance to re-enter `active` state. It's also possible for `active` jobs to become `expired`, which happens when job processing takes too long. Jobs can also enter `cancelled` state via [`cancel(id)`](#cancelid) or [`cancel([ids])`](#cancelids).
 
 All jobs that are `completed`, `expired`, `cancelled` or `failed` become eligible for archiving (i.e. they will transition into the `archive` state) after the configured `archiveCompletedAfterSeconds` time. Once `archive`d, jobs will be automatically deleted by pg-boss after the configured deletion period.
 
@@ -343,6 +343,12 @@ Queue options contain the following constructor-only settings.
 
   Default: 12 hours
 
+* **archiveFailedAfterSeconds**
+
+    Specifies how long in seconds failed jobs get archived. Note: a warning will be emitted if set to lower than 60s and cron processing will be disabled.
+
+  Default: `archiveCompletedAfterSeconds`
+
 **Monitoring options**
 
 * **monitorStateIntervalSeconds** - int, default undefined
@@ -437,6 +443,9 @@ By default, calling `stop()` without any arguments will gracefully wait for all 
 **Arguments**
 
 * `options`: object
+
+  * `destroy`, bool
+    Default: `false`. If `true` and the database connection is managed by pg-boss, it will destroy the connection pool.
 
   * `graceful`, bool
 
@@ -550,7 +559,7 @@ Available in constructor as a default, or overridden in send.
 
 * **singletonKey** string
 
-  Only allows 1 job (within the same name) to be queued or active with the same singletonKey.
+  Allows a max of 1 job (with the same name and singletonKey) to be queued or active.
 
   ```js
   boss.send('my-job', {}, {singletonKey: '123'}) // resolves a jobId
@@ -561,7 +570,9 @@ Available in constructor as a default, or overridden in send.
 
   * **useSingletonQueue** boolean
 
-  When used in conjunction with singletonKey, only allows 1 job (within the same name) to be queued with the same singletonKey.
+    When used in conjunction with singletonKey, allows a max of 1 job to be queued.
+
+    >By default, there is no limit on the number of these jobs that may be active. However, this behavior may be modified by passing the [enforceSingletonQueueActiveLimit](#fetch) option.
 
   ```js
   boss.send('my-job', {}, {singletonKey: '123', useSingletonQueue: true}) // resolves a jobId
@@ -735,6 +746,11 @@ Typically one would use `work()` for automated polling for new jobs based upon a
     | oncomplete | bool |
     | output | object |
 
+  * `enforceSingletonQueueActiveLimit`, bool
+
+    If `true`, modifies the behavior of the `useSingletonQueue` flag to allow a max of 1 job to be queued plus a max of 1 job to be active.
+    >Note that use of this option can impact performance on instances with large numbers of jobs.
+
 
 **Resolves**
 - `[job]`: array of job objects, `null` if none found
@@ -810,6 +826,10 @@ The default concurrency for `work()` is 1 job every 2 seconds. Both the interval
 
     Same as in [`fetch()`](#fetch)
 
+* **enforceSingletonQueueActiveLimit**, bool
+
+    Same as in [`fetch()`](#fetch)
+
 **Polling options**
 
 How often workers will poll the queue table for jobs. Available in the constructor as a default or per worker in `work()` and `onComplete()`.
@@ -829,11 +849,9 @@ How often workers will poll the queue table for jobs. Available in the construct
 
 **Handler function**
 
-Typically `handler` will be an `async` function, since this automatically returns promises that can be awaited for backpressure support.
+`handler` should either be an `async` function or return a promise. If an error occurs in the handler, it will be caught and stored into an output storage column in addition to marking the job as failed.
 
-If handler returns a promise, the value resolved/returned will be stored in a completion job. Likewise, if an error occurs in the handler, it will be caught and useful error properties stored into a completion job in addition to marking the job as failed.
-
-Finally, and importantly, promise-returning handlers will be awaited before polling for new jobs which provides **automatic backpressure**.
+Enforcing promise-returning handlers that are awaited in the workers defers polling for new jobs until the existing jobs are completed, providing backpressure.
 
 The job object has the following properties.
 
@@ -842,28 +860,14 @@ The job object has the following properties.
 |`id`| string, uuid |
 |`name`| string |
 |`data`| object |
-|`done(err, data)` | function | callback function used to mark the job as completed or failed. Returns a promise.
 
-If `handler` does not return a promise, `done()` should be used to mark the job as completed or failed. `done()` accepts optional arguments, `err` and `data`, for usage with [`onComplete()`](#oncompletename--options-handler) state-based workers. If `err` is truthy, it will mark the job as failed.
-
-> If the job is not completed, either by returning a promise from `handler` or manually via `job.done()`, it will expire after the configured expiration period.
+> If the job is not completed, it will expire after the configured expiration period.
 
 Following is an example of a worker that returns a promise (`sendWelcomeEmail()`) for completion with the teamSize option set for increased job concurrency between polling intervals.
 
 ```js
 const options = { teamSize: 5, teamConcurrency: 5 }
 await boss.work('email-welcome', options, job => myEmailService.sendWelcomeEmail(job.data))
-```
-
-And the same example, but without returning a promise in the handler.
-
-```js
-const options = { teamSize: 5, teamConcurrency: 5 }
-await boss.work('email-welcome', options, job => {
-    myEmailService.sendWelcomeEmail(job.data)
-        .then(() => job.done())
-        .catch(error => job.done(error))
-  })
 ```
 
 Similar to the first example, but with a batch of jobs at once.
